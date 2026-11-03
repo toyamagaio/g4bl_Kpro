@@ -1,0 +1,38 @@
+physics QGSP_BERT 
+
+param -unset histoFile=root/cosmic_test1.root histoUpdate=50000
+param -unset z_beam=-50.
+param -unset beamMomMax=1000.0
+
+#param sigmaP=0.1*$beamMom/2.35
+param z_beam=-1000
+
+beamlossntuple Loss format=rootExtended #require=TrackID==1 
+#material solidD2 Z=1 A=2.01 density=0.170 temperature=3 state=s 
+
+###pencil
+#beam gaussian particle=mu- nEvents=100000 beamZ=$z_beam sigmaX=0.0 sigmaY=0.0 meanMomentum=$beamMom sigmaP=0
+###gaus
+#beam gaussian particle=mu- nEvents=100000 beamZ=$z_beam sigmaX=20.0 sigmaY=20.0 meanMomentum=$beamMom sigmaP=$sigmaP
+#beam gaussian particle=mu- nEvents=100000 beamZ=$z_beam sigmaX=20.0 sigmaY=20.0 sigmaXp=0.1 sigmaYp=0.1 meanMomentum=$beamMom sigmaP=$sigmaP
+###cosmic
+param r_beam=100.
+cosmicraybeam nEvents=100000 beamZ=$z_beam radius=$r_beam beamHeight=100 beamWidth=100
+
+box BeamVis width=10.0 height=10.0 length=1.0 material=Vacuum color=1,0,0 
+#tubs BeamVis innerRadius=0.0 outerRadius=$r_beam length=1.0 material=Vacuum color=1,0,0 
+box target1 width=320.0 length=80.0 height=80.0 material=Fe color=1,1,0 
+box target2 width=320.0 length=80.0 height=80.0 material=Fe color=1,1,0 
+detector ScintiL   width=500.0 length=20.0 height=750.0 material=Scintillator color=0,1,1 
+detector Scinti2 width=230.0 length=10.0 height=60.00 material=Scintillator color=0,1,1 
+
+
+place BeamVis z=$z_beam rotation=Y0  
+place ScintiL z=-470  x=0. y=0.  rename=Scinti#
+place ScintiL z=-10.  x=0. y=0.  rename=Scinti#
+place Scinti2 z=-135  x=55. y=0.  rename=Scinti#
+place Scinti2 z=-135  x=200. y=0. rotation=Z90 rename=Scinti#
+place target1 z=-90 x=0. y=0.
+place target2 z=-90 x=200. y=0. rotation=Z90
+label text="cosmic_test1.g4bl" 1200,0,-500 
+#trackcuts keep=mu- 
