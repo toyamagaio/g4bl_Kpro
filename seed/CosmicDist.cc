@@ -4,6 +4,11 @@
 #include <sstream>
 #include <math.h>
 #include <string>
+#include <cstdlib>
+#include <cerrno>
+#include <cmath>
+#include <getopt.h>
+#include <algorithm>
 using namespace std;
 
 #include "TApplication.h"
@@ -55,6 +60,17 @@ class CosmicDist
   void SetDistType( int type )  { pos_type = type; }
   void SetMaxEvent( int N )  { ENumMax = N; }
   void SetDiameter( double d )  { D_D2 = d; }
+  void SetAnglePower( double n ) { angle_power = n; }
+  void SetMomentumDistType( int type ) { momentum_type = type; }
+  void SetMomentumRange( double min, double max ) { momentum_min = min; momentum_max = max; }
+  void SetMomentumCoefficients( double c0, double c1, double c2 ) {
+    momentum_c0 = c0; momentum_c1 = c1; momentum_c2 = c2;
+  }
+  void SetPositionShape( int shape ) { position_shape = shape; }
+  void SetPositionSize( double width, double height ) {
+    position_width = width; position_height = height;
+  }
+  bool ValidateConfiguration( string &error ) const;
 
   private:
     Setting *set;
@@ -62,7 +78,15 @@ class CosmicDist
     int ENum, ENumMax;
     int pos_type;
     double D_D2;//diameter of D2 target [mm]
-    TVector3 GetUniformDistribution(double costMin=-1., double costMax = 1.);
+    double angle_power;
+    int momentum_type; // 0: uniform, 1: linear, 2: quadratic
+    double momentum_min, momentum_max;
+    double momentum_c0, momentum_c1, momentum_c2;
+    int position_shape; // 0: circle, 1: rectangle
+    double position_width, position_height;
+    TVector3 GetCosPowerDistribution(double n);
+    double GetMomentum();
+    double MomentumShape(double x) const;
     void ConvertToNKS2Coordinate(TVector3 &dir);
     double GetUniformR(double Rmax);
     FILE *asciiFile;
@@ -85,6 +109,10 @@ class CosmicDist
 
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 CosmicDist::CosmicDist()
+  : ENum(0), ENumMax(0), pos_type(0), D_D2(80.), angle_power(0.),
+    momentum_type(0), momentum_min(1.), momentum_max(1.),
+    momentum_c0(1.), momentum_c1(0.), momentum_c2(0.),
+    position_shape(0), position_width(80.), position_height(80.), asciiFile(0)
 {
 
   gErrorIgnoreLevel = kError;
@@ -141,7 +169,7 @@ CosmicDist::CosmicDist()
 }
 ////////////////////////////////////////////////////////////////////////////
 CosmicDist::~CosmicDist(){
-  fclose(asciiFile);
+  if(asciiFile) fclose(asciiFile);
   //ofp->Write();
   //ofp->Close();
 }
@@ -195,10 +223,17 @@ void CosmicDist::Loop(){
     double x_muon  = 0.;
     double y_muon  = 0.;
     if(pos_type==1){
-      r_muon     = GetUniformR(0.5*D_D2);
-      theta_muon = 2.*TMath::Pi()*(gRandom->Uniform()-0.5);
-      x_muon     = r_muon*TMath::Cos(theta_muon);
-      y_muon     = r_muon*TMath::Sin(theta_muon);
+      if(position_shape==1){
+        x_muon = gRandom->Uniform(-0.5*position_width, 0.5*position_width);
+        y_muon = gRandom->Uniform(-0.5*position_height, 0.5*position_height);
+        r_muon = sqrt(x_muon*x_muon + y_muon*y_muon);
+        theta_muon = TMath::ATan2(y_muon, x_muon);
+      }else{
+        r_muon     = GetUniformR(0.5*D_D2);
+        theta_muon = 2.*TMath::Pi()*(gRandom->Uniform()-0.5);
+        x_muon     = r_muon*TMath::Cos(theta_muon);
+        y_muon     = r_muon*TMath::Sin(theta_muon);
+      }
     }else if(pos_type==2){
       while(1){
         x_muon     = gRandom->Gaus(0.,20.);
@@ -210,7 +245,7 @@ void CosmicDist::Loop(){
     }
 
     pos_muon.SetXYZ(x_muon, y_muon, 0.);
-    dir_muon=GetUniformDistribution(0.);
+    dir_muon=GetCosPowerDistribution(angle_power);
     double cost_muon =dir_muon.Z();
 
     h_cost_muon_gene          ->Fill(cost_muon);
@@ -223,39 +258,114 @@ void CosmicDist::Loop(){
     cout<<Form("pos_muon.X(): %lf, pos_muon.Z(): %lf, dir_muon.X(): %lf, dir_muon.Z(): %lf, cost_muon: %lf"
           ,     pos_muon.X(),      pos_muon.Z(),      dir_muon.X(),      dir_muon.Z(),      cost_muon)<<endl;
 
-    WriteALine(pos_muon, dir_muon, n);
+    WriteALine(pos_muon, dir_muon*GetMomentum(), n);
   }
 }
 ////////////////////////////////////////////////
 //_______________________________________________________________________________________________________________________________
 
-TVector3 CosmicDist::GetUniformDistribution(double costMin, double costMax)
+TVector3 CosmicDist::GetCosPowerDistribution(double n)
 {
-
-  // forward peak
-
-  //  G4double uniform_tmp; 
-  //  do {
-  //    uniform_tmp = G4UniformRand();
-  //  } while ( G4UniformRand() >= uniform_tmp) ;
-  //  G4double cost = (costMax-costMin)*uniform_tmp + costMin;
-
-  // backford peak
-
-  //  G4double uniform_tmp; 
-  //  do {
-  //    uniform_tmp = G4UniformRand();
-  //  } while( G4UniformRand() <= uniform_tmp );
-  //  G4double cost = (costMax-costMin)*uniform_tmp + costMin;
-  
-
-  // uniform
-  double cost = (costMax-costMin)*gRandom->Uniform(1) + costMin;
+  // A flux proportional to cos^n(theta) per unit solid angle has
+  // p(cos(theta)) proportional to cos^n(theta).  Invert its CDF on
+  // the downward hemisphere: cos(theta) = U^(1/(n+1)).
+  double cost = pow(gRandom->Uniform(), 1.0/(n+1.0));
   double sint = sqrt(1.-cost*cost);
-  double phi  = 2.*TMath::Pi()*(gRandom->Uniform(1)-0.5);
+  double phi  = 2.*TMath::Pi()*(gRandom->Uniform()-0.5);
   
   //return TVector3(cost, sint*cos(phi), sint*sin(phi));//NKS2 coordinate (x is the beam axis)
   return TVector3(sint*cos(phi), sint*sin(phi),cost);//normal coordinate (z is the beam axis)
+}
+//_______________________________________________________________________________________________________________________________
+double CosmicDist::MomentumShape(double x) const
+{
+  double value = momentum_c0 + momentum_c1*x;
+  if(momentum_type==2) value += momentum_c2*x*x;
+  return value;
+}
+//_______________________________________________________________________________________________________________________________
+double CosmicDist::GetMomentum()
+{
+  if(momentum_min==momentum_max)
+    return momentum_min;
+  if(momentum_type==0)
+    return gRandom->Uniform(momentum_min,momentum_max);
+
+  // Invert the normalized polynomial CDF on x in [0,1]. Bisection avoids
+  // special-case roots and remains stable for linear and quadratic shapes.
+  double norm = momentum_c0 + 0.5*momentum_c1;
+  if(momentum_type==2) norm += momentum_c2/3.0;
+  double target = gRandom->Uniform()*norm;
+  double low = 0.0, high = 1.0;
+  for(int i=0;i<48;i++){
+    double x = 0.5*(low+high);
+    double integral = momentum_c0*x + 0.5*momentum_c1*x*x;
+    if(momentum_type==2) integral += (momentum_c2/3.0)*x*x*x;
+    if(integral < target) low = x;
+    else high = x;
+  }
+  return momentum_min + (momentum_max-momentum_min)*0.5*(low+high);
+}
+//_______________________________________________________________________________________________________________________________
+bool CosmicDist::ValidateConfiguration(string &error) const
+{
+  if(!std::isfinite(angle_power) || angle_power<0.){
+    error = "angle power n must be finite and non-negative";
+    return false;
+  }
+  if(ENumMax<0){
+    error = "number of events must be non-negative";
+    return false;
+  }
+  if(momentum_type<0 || momentum_type>2){
+    error = "momentum distribution must be uniform, linear, or quadratic";
+    return false;
+  }
+  if(!std::isfinite(momentum_min) || !std::isfinite(momentum_max) ||
+     momentum_min<0. || momentum_max<momentum_min){
+    error = "momentum range must satisfy 0 <= min <= max";
+    return false;
+  }
+  if(momentum_type!=0 && momentum_min!=momentum_max){
+    if(!std::isfinite(momentum_c0) || !std::isfinite(momentum_c1) ||
+       (momentum_type==2 && !std::isfinite(momentum_c2))){
+      error = "momentum coefficients must be finite";
+      return false;
+    }
+    double min_value = MomentumShape(0.);
+    min_value = std::min(min_value, MomentumShape(1.));
+    if(momentum_type==2 && momentum_c2>0.){
+      double vertex = -momentum_c1/(2.*momentum_c2);
+      if(vertex>0. && vertex<1.) min_value = std::min(min_value, MomentumShape(vertex));
+    }
+    double norm = momentum_c0 + 0.5*momentum_c1;
+    if(momentum_type==2) norm += momentum_c2/3.0;
+    if(min_value<0. || !std::isfinite(norm) || norm<=0.){
+      error = "momentum polynomial must be non-negative on [0,1] and have positive integral";
+      return false;
+    }
+  }
+  if(position_shape<0 || position_shape>1){
+    error = "position shape must be circle or rectangle";
+    return false;
+  }
+  if(pos_type<0 || pos_type>2){
+    error = "position type must be 0, 1, or 2";
+    return false;
+  }
+  if(pos_type==1 && position_shape==1 &&
+     (!std::isfinite(position_width) || !std::isfinite(position_height) ||
+      position_width<=0. || position_height<=0.)){
+    error = "rectangle width and height must be positive";
+    return false;
+  }
+  if((pos_type==1 && position_shape==0) || pos_type==2){
+    if(!std::isfinite(D_D2) || D_D2<=0.){
+      error = "circular source diameter must be positive";
+      return false;
+    }
+  }
+  return true;
 }
 //_______________________________________________________________________________________________________________________________
 double CosmicDist::GetUniformR(double Rmax)
@@ -319,6 +429,44 @@ void CosmicDist::SaveCanvas(string PdfFileName){
 ////////////////////////////////////////////////////////////////////////////
 //////////////////////////// main //////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////
+bool ParseDoubleOption(const char *text, double &value)
+{
+  char *end = 0;
+  errno = 0;
+  value = strtod(text, &end);
+  return end!=text && *end=='\0' && errno!=ERANGE && std::isfinite(value);
+}
+
+bool ParseIntOption(const char *text, int &value)
+{
+  char *end = 0;
+  errno = 0;
+  long parsed = strtol(text, &end, 10);
+  if(end==text || *end!='\0' || errno==ERANGE || parsed<(-2147483647L-1) || parsed>2147483647L)
+    return false;
+  value = static_cast<int>(parsed);
+  return true;
+}
+
+bool ParseMomentumType(const char *text, int &type)
+{
+  string value(text);
+  if(value=="uniform" || value=="0") type=0;
+  else if(value=="linear" || value=="1") type=1;
+  else if(value=="quadratic" || value=="2") type=2;
+  else return false;
+  return true;
+}
+
+bool ParsePositionShape(const char *text, int &shape)
+{
+  string value(text);
+  if(value=="circle" || value=="circular") shape=0;
+  else if(value=="rectangle" || value=="rectangular" || value=="rect") shape=1;
+  else return false;
+  return true;
+}
+
 int main(int argc, char** argv){
 
   string ofname = "root/tmp.root";
@@ -327,29 +475,85 @@ int main(int argc, char** argv){
   //string ofname_pdf = "tmp.pdf";
   bool draw_flag = true;
   double Dinput=80.;
+  double anglePower=0.;
+  int MomentumType=0;
+  double MomentumMin=1., MomentumMax=1.;
+  double MomentumC0=1., MomentumC1=0., MomentumC2=0.;
+  int PositionShape=0;
+  double PositionWidth=80., PositionHeight=80.;
   int ch;
   int MaxNum   = 1000;
   int DistType = 0;
   int sdd_x = 0;
   string pngname;
   extern char *optarg;
-  while((ch=getopt(argc,argv,"hw:n:bp:d:t:x:"))!=-1){
+  static struct option long_options[] = {
+    {"help", no_argument, 0, 'h'},
+    {"output", required_argument, 0, 'w'},
+    {"pdf", required_argument, 0, 'p'},
+    {"batch", no_argument, 0, 'b'},
+    {"diameter", required_argument, 0, 'd'},
+    {"position-type", required_argument, 0, 't'},
+    {"events", required_argument, 0, 'n'},
+    {"angle-power", required_argument, 0, 'a'},
+    {"momentum", required_argument, 0, 'm'},
+    {"momentum-min", required_argument, 0, 'l'},
+    {"momentum-max", required_argument, 0, 'u'},
+    {"p0", required_argument, 0, 'c'},
+    {"p1", required_argument, 0, 'A'},
+    {"p2", required_argument, 0, 'B'},
+    {"position-shape", required_argument, 0, 'g'},
+    {"width", required_argument, 0, 'W'},
+    {"height", required_argument, 0, 'H'},
+    {0, 0, 0, 0}
+  };
+  while((ch=getopt_long(argc,argv,"hw:n:bp:d:t:x:a:m:l:u:c:A:B:g:W:H:",long_options,0))!=-1){
     switch(ch){
     case 'w':
       ofname = optarg;
       cout<<"output filename : "<<ofname<<endl;
       break;
     case 'd':
-      Dinput = atof(optarg);
+      if(!ParseDoubleOption(optarg,Dinput)){ cerr<<"invalid diameter: "<<optarg<<endl; return 1; }
       break;
     case 'n':
-      MaxNum = atoi(optarg);
+      if(!ParseIntOption(optarg,MaxNum)){ cerr<<"invalid event count: "<<optarg<<endl; return 1; }
       break;
     case 't':
-      DistType = atoi(optarg);
+      if(!ParseIntOption(optarg,DistType)){ cerr<<"invalid position type: "<<optarg<<endl; return 1; }
       break;
     case 'x':
-      sdd_x = atoi(optarg);
+      if(!ParseIntOption(optarg,sdd_x)){ cerr<<"invalid x value: "<<optarg<<endl; return 1; }
+      break;
+    case 'a':
+      if(!ParseDoubleOption(optarg,anglePower)){ cerr<<"invalid angle power: "<<optarg<<endl; return 1; }
+      break;
+    case 'm':
+      if(!ParseMomentumType(optarg,MomentumType)){ cerr<<"momentum type must be uniform, linear, or quadratic"<<endl; return 1; }
+      break;
+    case 'l':
+      if(!ParseDoubleOption(optarg,MomentumMin)){ cerr<<"invalid minimum momentum: "<<optarg<<endl; return 1; }
+      break;
+    case 'u':
+      if(!ParseDoubleOption(optarg,MomentumMax)){ cerr<<"invalid maximum momentum: "<<optarg<<endl; return 1; }
+      break;
+    case 'c':
+      if(!ParseDoubleOption(optarg,MomentumC0)){ cerr<<"invalid momentum coefficient p0: "<<optarg<<endl; return 1; }
+      break;
+    case 'A':
+      if(!ParseDoubleOption(optarg,MomentumC1)){ cerr<<"invalid momentum coefficient p1: "<<optarg<<endl; return 1; }
+      break;
+    case 'B':
+      if(!ParseDoubleOption(optarg,MomentumC2)){ cerr<<"invalid momentum coefficient p2: "<<optarg<<endl; return 1; }
+      break;
+    case 'g':
+      if(!ParsePositionShape(optarg,PositionShape)){ cerr<<"position shape must be circle or rectangle"<<endl; return 1; }
+      break;
+    case 'W':
+      if(!ParseDoubleOption(optarg,PositionWidth)){ cerr<<"invalid rectangle width: "<<optarg<<endl; return 1; }
+      break;
+    case 'H':
+      if(!ParseDoubleOption(optarg,PositionHeight)){ cerr<<"invalid rectangle height: "<<optarg<<endl; return 1; }
       break;
     case 'b':
       draw_flag=false;
@@ -363,8 +567,21 @@ int main(int argc, char** argv){
       cout<<"-p : output pdf filename" <<endl;
       cout<<"-b : batch mode"           <<endl;
       cout<<"-d : diameter of D2 target (phi [mm])"     <<endl;
-      cout<<"-t : Cosmic source poit type 0(default): from center only, 1: phi60 mm uniform, 2: gauss (sigma=20mm)"           <<endl;
+      cout<<"-t : source position type 0(default): center, 1: uniform area, 2: truncated Gaussian (sigma=20 mm)"<<endl;
       cout<<"-n : maximum number of events to be analysed "<<endl;
+      cout<<"-a, --angle-power : flux per solid angle proportional to cos(theta)^n on downward hemisphere (default n=0)"<<endl;
+      cout<<"-m, --momentum : momentum distribution: uniform, linear, or quadratic (default uniform)"<<endl;
+      cout<<"-l, --momentum-min : minimum momentum in MeV/c (default 1)"<<endl;
+      cout<<"-u, --momentum-max : maximum momentum in MeV/c (default 1)"<<endl;
+      cout<<"-c, --p0 : constant momentum-polynomial coefficient (default 1)"<<endl;
+      cout<<"-A, --p1 : linear momentum-polynomial coefficient (default 0)"<<endl;
+      cout<<"-B, --p2 : quadratic momentum-polynomial coefficient (default 0)"<<endl;
+      cout<<"             f(x)=p0+p1*x (+p2*x^2), x=(p-pmin)/(pmax-pmin); density is normalized automatically"<<endl;
+      cout<<"-g, --position-shape : circle or rectangle for uniform-area position type -t 1 (default circle)"<<endl;
+      cout<<"-W, --width : rectangle width in mm (default 80)"<<endl;
+      cout<<"-H, --height : rectangle height in mm (default 80)"<<endl;
+      cout<<"Example: -a 2 -m quadratic -l 100 -u 1000 -c 1 -A 0 -B 2"<<endl;
+      cout<<"          -t 1 -g rectangle -W 120 -H 80"<<endl;
       return 0;
       break;
     case '?':
@@ -377,16 +594,29 @@ int main(int argc, char** argv){
     }
   }
 
-  ofname_root = ofname;
-
-
   TApplication *theApp = new TApplication("App", &argc, argv);
+  string configError;
   CosmicDist *calc = new CosmicDist();
-  calc->SetFileName(ofname);
-  calc->OutputFileOpen();
   calc->SetMaxEvent(MaxNum);
   calc->SetDiameter(Dinput);
   calc->SetDistType(DistType);
+  calc->SetAnglePower(anglePower);
+  calc->SetMomentumDistType(MomentumType);
+  calc->SetMomentumRange(MomentumMin,MomentumMax);
+  calc->SetMomentumCoefficients(MomentumC0,MomentumC1,MomentumC2);
+  calc->SetPositionShape(PositionShape);
+  calc->SetPositionSize(PositionWidth,PositionHeight);
+  if(!calc->ValidateConfiguration(configError)){
+    cerr<<"invalid configuration: "<<configError<<endl;
+    delete calc;
+    return 1;
+  }
+
+  ofname_root = ofname;
+
+
+  calc->SetFileName(ofname);
+  calc->OutputFileOpen();
   calc->MakeHist("");
   //calc->SetBranch();
   calc->Loop();
