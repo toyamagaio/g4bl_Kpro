@@ -56,7 +56,8 @@ class CosmicDist
   void SaveCanvas(string PdfFileName); 
   void SetFileName( string filename )  { ascii_filename = filename; }
   void OutputFileOpen();
-  void WriteALine(TVector3 pos, TVector3 dir, int evID, int trID=1, int pareID=0, double weight=1.0);
+  void WriteALine(TVector3 pos, TVector3 dir, int evID, int trID=1, int pareID=0,
+                  double weight=1.0, int PDGid=22);
   void SetDistType( int type )  { pos_type = type; }
   void SetMaxEvent( int N )  { ENumMax = N; }
   void SetDiameter( double d )  { D_D2 = d; }
@@ -70,6 +71,7 @@ class CosmicDist
   void SetPositionSize( double width, double height ) {
     position_width = width; position_height = height;
   }
+  void SetPDGid( int id ) { pdg_id = id; }
   bool ValidateConfiguration( string &error ) const;
 
   private:
@@ -84,6 +86,7 @@ class CosmicDist
     double momentum_c0, momentum_c1, momentum_c2;
     int position_shape; // 0: circle, 1: rectangle
     double position_width, position_height;
+    int pdg_id;
     TVector3 GetCosPowerDistribution(double n);
     double GetMomentum();
     double MomentumShape(double x) const;
@@ -112,7 +115,7 @@ CosmicDist::CosmicDist()
   : ENum(0), ENumMax(0), pos_type(0), D_D2(80.), angle_power(0.),
     momentum_type(0), momentum_min(1.), momentum_max(1.),
     momentum_c0(1.), momentum_c1(0.), momentum_c2(0.),
-    position_shape(0), position_width(80.), position_height(80.), asciiFile(0)
+    position_shape(0), position_width(80.), position_height(80.), pdg_id(22), asciiFile(0)
 {
 
   gErrorIgnoreLevel = kError;
@@ -258,7 +261,7 @@ void CosmicDist::Loop(){
     cout<<Form("pos_muon.X(): %lf, pos_muon.Z(): %lf, dir_muon.X(): %lf, dir_muon.Z(): %lf, cost_muon: %lf"
           ,     pos_muon.X(),      pos_muon.Z(),      dir_muon.X(),      dir_muon.Z(),      cost_muon)<<endl;
 
-    WriteALine(pos_muon, dir_muon*GetMomentum(), n);
+    WriteALine(pos_muon, dir_muon*GetMomentum(), n, 1, 0, 1.0, pdg_id);
   }
 }
 ////////////////////////////////////////////////
@@ -410,9 +413,9 @@ void CosmicDist::OutputFileOpen(){
   fprintf(asciiFile,"#mm mm mm MeV/c MeV/c MeV/c ns - - - - -\n");
 }
 ////////////////////////////////////////////////////////////////////////////
-void CosmicDist::WriteALine(TVector3 pos, TVector3 dir, int evID, int trID, int pareID, double weight){
+void CosmicDist::WriteALine(TVector3 pos, TVector3 dir, int evID, int trID, int pareID,
+                            double weight, int PDGid){
   double time=0.;
-  int PDGid=22;
   fprintf(asciiFile,"%.6g %.6g %.6g ",pos.X(),pos.Y(),pos.Z());
   fprintf(asciiFile,"%.6g %.6g %.6g ",dir.X(),dir.Y(),dir.Z());
   fprintf(asciiFile,"%.6g %d %d %d %d %.6g\n",time,PDGid,evID,
@@ -481,6 +484,7 @@ int main(int argc, char** argv){
   double MomentumC0=1., MomentumC1=0., MomentumC2=0.;
   int PositionShape=0;
   double PositionWidth=80., PositionHeight=80.;
+  int PDGid=22;
   int ch;
   int MaxNum   = 1000;
   int DistType = 0;
@@ -505,9 +509,10 @@ int main(int argc, char** argv){
     {"position-shape", required_argument, 0, 'g'},
     {"width", required_argument, 0, 'W'},
     {"height", required_argument, 0, 'H'},
+    {"pdg-id", required_argument, 0, 'i'},
     {0, 0, 0, 0}
   };
-  while((ch=getopt_long(argc,argv,"hw:n:bp:d:t:x:a:m:l:u:c:A:B:g:W:H:",long_options,0))!=-1){
+  while((ch=getopt_long(argc,argv,"hw:n:bp:d:t:x:a:m:l:u:c:A:B:g:W:H:i:",long_options,0))!=-1){
     switch(ch){
     case 'w':
       ofname = optarg;
@@ -555,6 +560,9 @@ int main(int argc, char** argv){
     case 'H':
       if(!ParseDoubleOption(optarg,PositionHeight)){ cerr<<"invalid rectangle height: "<<optarg<<endl; return 1; }
       break;
+    case 'i':
+      if(!ParseIntOption(optarg,PDGid)){ cerr<<"invalid PDG ID: "<<optarg<<endl; return 1; }
+      break;
     case 'b':
       draw_flag=false;
       cout<<"BACH MODE!"<<endl;
@@ -580,6 +588,7 @@ int main(int argc, char** argv){
       cout<<"-g, --position-shape : circle or rectangle for uniform-area position type -t 1 (default circle)"<<endl;
       cout<<"-W, --width : rectangle width in mm (default 80)"<<endl;
       cout<<"-H, --height : rectangle height in mm (default 80)"<<endl;
+      cout<<"-i, --pdg-id : particle PDG ID written to the seed file (default 22)"<<endl;
       cout<<"Example: -a 2 -m quadratic -l 100 -u 1000 -c 1 -A 0 -B 2"<<endl;
       cout<<"          -t 1 -g rectangle -W 120 -H 80"<<endl;
       return 0;
@@ -606,6 +615,7 @@ int main(int argc, char** argv){
   calc->SetMomentumCoefficients(MomentumC0,MomentumC1,MomentumC2);
   calc->SetPositionShape(PositionShape);
   calc->SetPositionSize(PositionWidth,PositionHeight);
+  calc->SetPDGid(PDGid);
   if(!calc->ValidateConfiguration(configError)){
     cerr<<"invalid configuration: "<<configError<<endl;
     delete calc;
